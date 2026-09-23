@@ -1,76 +1,82 @@
 """
-Application control module: launching and terminating Windows processes.
+Application process management tools for VoicePilot.
+Launches and terminates Windows processes with fallback path discovery.
 """
+import os
 import subprocess
 import psutil
-from typing import Dict, Any
-
-from agent.config import APP_ALIASES
 from agent.tools.base import tool_response
 
+# Common Windows install locations for standard apps
+KNOWN_APP_PATHS = {
+    "chrome": [
+        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+    ],
+    "edge": [
+        os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
+        os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"),
+    ],
+    "notepad": ["notepad.exe"],
+    "calc": ["calc.exe"],
+    "calculator": ["calc.exe"],
+    "spotify": [
+        os.path.expandvars(r"%AppData%\Spotify\Spotify.exe"),
+    ]
+}
 
-def launch_app(app_name: str) -> Dict[str, Any]:
-    """
-    Launches a local Windows application by name or common alias.
-    """
-    target = app_name.strip().lower()
-    binary = APP_ALIASES.get(target, app_name)
 
+def launch_app(app_name: str) -> dict:
+    if not app_name:
+        return tool_response(False, "No application name specified.")
+
+    clean_name = app_name.lower().strip().replace(".exe", "")
+
+    # 1. Check known absolute paths for browsers / major apps
+    if clean_name in KNOWN_APP_PATHS:
+        for path in KNOWN_APP_PATHS[clean_name]:
+            if os.path.exists(path):
+                try:
+                    subprocess.Popen([path], shell=False)
+                    return tool_response(True, f"Launched {clean_name.capitalize()} successfully.")
+                except Exception:
+                    pass
+
+    # 2. Try Windows Shell 'start' (works for apps registered in App Paths)
     try:
-        process = subprocess.Popen(
-            binary,
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        return tool_response(
-            success=True,
-            message=f"Application '{app_name}' launched successfully.",
-            data={"pid": process.pid, "target": binary}
-        )
-    except Exception as e:
-        return tool_response(
-            success=False,
-            message=f"Failed to launch '{app_name}': {str(e)}"
-        )
+        os.system(f'start "" "{clean_name}"')
+        return tool_response(True, f"Launched {clean_name}.")
+    except Exception:
+        pass
 
-
-def terminate_app(app_name: str) -> Dict[str, Any]:
-    """
-    Finds and gracefully terminates all running processes matching the app_name.
-    """
-    target = app_name.strip().lower()
-    target_bin = APP_ALIASES.get(target, target).lower()
-    terminated_pids = []
-
+    # 3. Direct subprocess fallback
     try:
-        for proc in psutil.process_iter(['pid', 'name']):
-            try:
-                proc_name = proc.info['name']
-                if proc_name and (
-                    proc_name.lower() == target_bin or 
-                    target in proc_name.lower()
-                ):
-                    p = psutil.Process(proc.info['pid'])
-                    p.terminate()
-                    terminated_pids.append(proc.info['pid'])
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-
-        if terminated_pids:
-            return tool_response(
-                success=True,
-                message=f"Closed {len(terminated_pids)} instance(s) of '{app_name}'.",
-                data={"pids": terminated_pids}
-            )
-        else:
-            return tool_response(
-                success=False,
-                message=f"No active process found matching '{app_name}'."
-            )
-
+        subprocess.Popen([clean_name], shell=True)
+        return tool_response(True, f"Launched {clean_name}.")
     except Exception as e:
-        return tool_response(
-            success=False,
-            message=f"Error occurred while terminating '{app_name}': {str(e)}"
-        )
+        return tool_response(False, f"Failed to launch '{app_name}': {str(e)}")
+
+
+def terminate_app(app_name: str, force: bool = False) -> dict:
+    if not app_name:
+        return tool_response(False, "No application name specified to terminate.")
+
+    target = app_name.lower().strip().replace(".exe", "")
+    terminated_count = 0
+
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            p_name = proc.info['name'].lower().replace(".exe", "")
+            if target in p_name:
+                if force:
+                    proc.kill()
+                else:
+                    proc.terminate()
+                terminated_count += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    if terminated_count > 0:
+        return tool_response(True, f"Closed {terminated_count} process(es) matching '{app_name}'.")
+    return tool_response(False, f"No running application found matching '{app_name}'.")
