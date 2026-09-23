@@ -1,10 +1,9 @@
 """
-Pydantic schemas for VoicePilot structured actions.
+Pydantic Schemas for deterministic LLM output validation.
 """
-from typing import List, Optional, Literal, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from pydantic import BaseModel, Field
 
-# Supported tool actions
 ActionType = Literal[
     "launch_app",
     "terminate_app",
@@ -13,17 +12,27 @@ ActionType = Literal[
     "capture_screen",
     "type_text",
     "press_key",
-    "general_response"
+    "general_response",
+    "compose_email",
+    "send_whatsapp",
+    "calculate",
+    "set_alarm_timer",
+    "open_calendar",
+    "open_settings_panel",
+    "play_spotify",
+    "set_brightness",
+    "join_meet",
+    "adjust_volume"
 ]
 
+
 class ActionStep(BaseModel):
-    """Represents a single atomic operation."""
-    action: ActionType = Field(description="The designated tool identifier to execute.")
-    target: Optional[str] = Field(default=None, description="App name, key name, or primary entity.")
-    params: Dict[str, Any] = Field(default_factory=dict, description="Arbitrary arguments like query or text.")
+    action: ActionType = Field(..., description="The low-level tool action to execute.")
+    target: Optional[str] = Field(default=None, description="The primary entity target.")
+    params: Dict[str, Any] = Field(default_factory=dict, description="Arbitrary parameters.")
+
 
 class Plan(BaseModel):
-    """The complete response contract returned by the reasoning engine."""
-    thought: str = Field(description="Brief internal explanation of why these steps were chosen.")
-    steps: List[ActionStep] = Field(description="Ordered list of actions to satisfy the user request.")
-    spoken_response: str = Field(description="Natural, concise voice response to speak to the user.")
+    thought: str = Field(..., description="Concise rationale explaining steps.")
+    steps: List[ActionStep] = Field(..., description="Ordered action steps.")
+    spoken_response: str = Field(..., description="Natural language feedback to speak aloud.")

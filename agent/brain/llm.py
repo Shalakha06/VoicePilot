@@ -6,13 +6,12 @@ import os
 import json
 import requests
 from dotenv import load_dotenv
-from agent.brain.prompts import SYSTEM_PROMPT
+from agent.brain.prompts import build_system_prompt
 from agent.brain.schemas import Plan
 
 # Load environment variables from .env
 load_dotenv(override=True)
 
-# Central module configuration
 BASE_URL = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
 API_KEY = os.getenv("LLM_API_KEY", "").strip()
 MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-20b").strip()
@@ -30,14 +29,16 @@ class LLMBrain:
             "Content-Type": "application/json"
         }
 
-    def plan(self, user_command: str) -> Plan:
+    def plan(self, user_command: str, context: str = "") -> Plan:
         """
-        Sends the transcribed user command to the LLM and validates the output schema.
+        Sends user command and conversation context to LLM and validates the output schema.
         """
+        system_content = build_system_prompt(context)
+
         payload = {
             "model": MODEL,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": user_command}
             ],
             "temperature": 0.1,
@@ -54,7 +55,6 @@ class LLMBrain:
 
             if response.status_code != 200:
                 print(f"\n[LLM Debug] Status Code: {response.status_code}")
-                print(f"[LLM Debug] URL requested: {self.endpoint}")
                 print(f"[LLM Debug] Server message: {response.text}")
                 response.raise_for_status()
 

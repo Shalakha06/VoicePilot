@@ -1,6 +1,10 @@
-venv/
-.env
+﻿venv/
+.venv/
 __pycache__/
-logs/
+*.pyc
+.env
 screenshots/
-*.png
+*.wav
+*.mp3
+.cache/
+.vscode/

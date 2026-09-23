@@ -1,20 +1,26 @@
 """
-Central Tool Executor for VoicePilot with integrated Safety Verification.
+Central Tool Executor for VoicePilot.
+Validates safety before dispatching to system tools.
 """
 from typing import Dict, Any, List
-
 from agent.brain.schemas import ActionStep, Plan
-from agent.tools.base import tool_response
-from agent.tools.app_control import launch_app, terminate_app
-from agent.tools.browser import open_url, search_web
-from agent.tools.system import capture_screen, type_text, press_key
 from agent.safety.validator import SafetyValidator
 from agent.safety.policies import SafetyLevel
+from agent.tools.app_control import launch_app, terminate_app
+from agent.tools.browser import open_url, search_web, compose_email, send_whatsapp_message
+from agent.tools.system import (
+    capture_screen, type_text, press_key,
+    calculate, set_alarm_or_timer, open_calendar,
+    open_settings_panel, control_media_or_spotify,
+    set_screen_brightness, join_google_meet,
+    adjust_volume
+)
+from agent.tools.base import tool_response
 
 
 class ToolExecutor:
     def __init__(self):
-        self.validator = SafetyValidator()
+        self.safety = SafetyValidator()
         self._registry = {
             "launch_app": self._exec_launch_app,
             "terminate_app": self._exec_terminate_app,
@@ -23,86 +29,70 @@ class ToolExecutor:
             "capture_screen": self._exec_capture_screen,
             "type_text": self._exec_type_text,
             "press_key": self._exec_press_key,
-            "general_response": self._exec_general_response
+            "general_response": self._exec_general_response,
+            "compose_email": self._exec_compose_email,
+            "send_whatsapp": self._exec_send_whatsapp,
+            "calculate": self._exec_calculate,
+            "set_alarm_timer": self._exec_alarm_timer,
+            "open_calendar": self._exec_calendar,
+            "open_settings_panel": self._exec_settings_panel,
+            "play_spotify": self._exec_spotify,
+            "set_brightness": self._exec_brightness,
+            "join_meet": self._exec_join_meet,
+            "adjust_volume": self._exec_adjust_volume,
         }
-
-    def execute_step(self, step: ActionStep) -> Dict[str, Any]:
-        """
-        Validates safety constraints before executing an ActionStep.
-        """
-        level, reason = self.validator.evaluate(step)
-
-        # Tier 3: Blocked actions are dropped immediately
-        if level == SafetyLevel.BLOCKED:
-            return tool_response(
-                success=False,
-                message=f"[SAFETY BLOCKED] {reason}"
-            )
-
-        # Tier 2: Confirm-required actions prompt the user
-        if level == SafetyLevel.CONFIRM_REQUIRED:
-            confirmed = self.validator.request_confirmation(reason)
-            if not confirmed:
-                return tool_response(
-                    success=False,
-                    message="Operation cancelled by user."
-                )
-
-        # Tier 1: Safe actions proceed to handler
-        handler = self._registry.get(step.action)
-        if not handler:
-            return tool_response(
-                success=False,
-                message=f"Action '{step.action}' is not registered."
-            )
-
-        try:
-            return handler(step)
-        except Exception as e:
-            return tool_response(
-                success=False,
-                message=f"Unhandled error in '{step.action}': {str(e)}"
-            )
 
     def execute_plan(self, plan: Plan) -> List[Dict[str, Any]]:
         results = []
         for step in plan.steps:
             res = self.execute_step(step)
-            results.append({
-                "action": step.action,
-                "target": step.target,
-                "result": res
-            })
-
-            if not res["success"] and step.action != "general_response":
-                print(f"[Executor] Step '{step.action}' stopped/failed: {res['message']}")
-
+            results.append({"action": step.action, "result": res})
+            if not res.get("success", False) and res.get("status") in ["BLOCKED", "CONFIRMATION_REJECTED"]:
+                print(f"[Executor] Halting remaining steps: {res.get('message')}")
+                break
         return results
 
-    # --- Tool Bridges ---
+    def execute_step(self, step: ActionStep) -> Dict[str, Any]:
+        level, reason = self.safety.evaluate(step)
+
+        if level == SafetyLevel.BLOCKED:
+            print(f"\n[SAFETY BLOCKED]: {reason}")
+            return {"success": False, "status": "BLOCKED", "message": reason, "data": None}
+
+        if level == SafetyLevel.CONFIRM_REQUIRED:
+            confirmed = self.safety.request_confirmation(reason)
+            if not confirmed:
+                print("[SAFETY] Action rejected by user.")
+                return {"success": False, "status": "CONFIRMATION_REJECTED", "message": "Cancelled by user.", "data": None}
+
+        handler = self._registry.get(step.action)
+        if not handler:
+            return tool_response(False, f"Unrecognized action: '{step.action}'")
+
+        try:
+            return handler(step)
+        except Exception as e:
+            return tool_response(False, f"Execution failed on '{step.action}': {str(e)}")
+
     def _exec_launch_app(self, step: ActionStep) -> Dict[str, Any]:
-        if not step.target:
-            return tool_response(False, "Missing target application name.")
         return launch_app(step.target)
 
     def _exec_terminate_app(self, step: ActionStep) -> Dict[str, Any]:
-        if not step.target:
-            return tool_response(False, "Missing target application name to close.")
-        return terminate_app(step.target)
+        force = step.params.get("force", False)
+        return terminate_app(step.target, force=force)
 
     def _exec_open_url(self, step: ActionStep) -> Dict[str, Any]:
         url = step.params.get("url") or step.target
-        if not url:
-            return tool_response(False, "Missing target URL.")
         return open_url(url)
 
     def _exec_search_web(self, step: ActionStep) -> Dict[str, Any]:
-        query = step.params.get("query") or step.target or ""
-        return search_web(query)
+        query = step.params.get("query") or step.target
+        engine = step.params.get("engine", "google")
+        return search_web(query, engine=engine)
 
     def _exec_capture_screen(self, step: ActionStep) -> Dict[str, Any]:
-        prefix = step.params.get("filename_prefix", "shot")
-        return capture_screen(prefix)
+        prefix = step.params.get("filename_prefix", "screenshot")
+        return capture_screen(filename_prefix=prefix)
 
     def _exec_type_text(self, step: ActionStep) -> Dict[str, Any]:
         text = step.params.get("text", "")
@@ -113,4 +103,51 @@ class ToolExecutor:
         return press_key(key)
 
     def _exec_general_response(self, step: ActionStep) -> Dict[str, Any]:
-        return tool_response(True, "Informational query handled directly.")
+        return tool_response(True, "General response processed.")
+
+    def _exec_compose_email(self, step: ActionStep) -> Dict[str, Any]:
+        return compose_email(
+            recipient=step.params.get("recipient", ""),
+            subject=step.params.get("subject", ""),
+            body=step.params.get("body", "")
+        )
+
+    def _exec_send_whatsapp(self, step: ActionStep) -> Dict[str, Any]:
+        text = step.params.get("text", "") or step.target or ""
+        recipient = step.params.get("recipient", "")
+        phone = step.params.get("phone", "")
+        return send_whatsapp_message(text=text, recipient=recipient, phone=phone)
+
+    def _exec_calculate(self, step: ActionStep) -> Dict[str, Any]:
+        expr = step.params.get("expression") or step.target or ""
+        return calculate(expr)
+
+    def _exec_alarm_timer(self, step: ActionStep) -> Dict[str, Any]:
+        minutes = int(step.params.get("minutes", 0))
+        label = step.params.get("label", "Timer")
+        return set_alarm_or_timer(minutes=minutes, label=label)
+
+    def _exec_calendar(self, step: ActionStep) -> Dict[str, Any]:
+        title = step.params.get("title") or step.target or ""
+        return open_calendar(title=title)
+
+    def _exec_settings_panel(self, step: ActionStep) -> Dict[str, Any]:
+        panel = step.target or step.params.get("panel", "wifi")
+        return open_settings_panel(panel)
+
+    def _exec_spotify(self, step: ActionStep) -> Dict[str, Any]:
+        query = step.params.get("query") or step.target or ""
+        return control_media_or_spotify(query=query)
+
+    def _exec_brightness(self, step: ActionStep) -> Dict[str, Any]:
+        level = step.params.get("level", 50)
+        return set_screen_brightness(level=level)
+
+    def _exec_join_meet(self, step: ActionStep) -> Dict[str, Any]:
+        code = step.params.get("code") or step.target or ""
+        return join_google_meet(code)
+
+    def _exec_adjust_volume(self, step: ActionStep) -> Dict[str, Any]:
+        action = step.params.get("action") or step.target or "up"
+        level = step.params.get("level")
+        return adjust_volume(action=action, level=level)

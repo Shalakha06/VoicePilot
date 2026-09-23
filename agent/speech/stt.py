@@ -1,89 +1,85 @@
 """
-Speech-to-Text Module for VoicePilot.
-Captures microphone audio and transcribes it locally using faster-whisper.
+Push-to-Talk Speech-to-Text for VoicePilot using Faster-Whisper.
+Bypasses virtual sound cards (like DroidCam) and supports flexible talking duration.
 """
-import threading
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
-from agent.config import (
-    STT_MODEL_SIZE,
-    STT_DEVICE,
-    STT_COMPUTE_TYPE,
-    AUDIO_SAMPLE_RATE,
-    AUDIO_INPUT_DEVICE
-)
+
+
+def get_real_mic_device() -> int:
+    """Finds physical microphone (Nirvana Crystl, Intel Array, etc.), avoiding DroidCam."""
+    devices = sd.query_devices()
+    priority_keywords = ["nirvana", "crystl", "intel", "realtek", "array", "headset"]
+    exclude_keywords = ["droidcam", "virtual", "stereo mix", "mapper"]
+
+    for idx, dev in enumerate(devices):
+        name = dev["name"].lower()
+        if dev["max_input_channels"] > 0 and not any(ex in name for ex in exclude_keywords):
+            if any(pk in name for pk in priority_keywords):
+                return idx
+
+    for idx, dev in enumerate(devices):
+        if dev["max_input_channels"] > 0 and not any(ex in dev["name"].lower() for ex in exclude_keywords):
+            return idx
+
+    return sd.default.device[0]
 
 
 class SpeechToText:
-    def __init__(self):
-        print(f"[STT] Initializing faster-whisper ('{STT_MODEL_SIZE}' on {STT_DEVICE})...")
-        self.model = WhisperModel(
-            STT_MODEL_SIZE,
-            device=STT_DEVICE,
-            compute_type=STT_COMPUTE_TYPE
-        )
-        print("[STT] Speech model loaded and ready.")
+    def __init__(self, model_size: str = "base.en"):
+        print("[STT] Initializing Faster-Whisper (base.en)...")
+        self.sample_rate = 16000
+        self.device_index = get_real_mic_device()
+        self.whisper = WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=4)
 
-    def record_push_to_talk(self) -> np.ndarray:
-        """
-        Records audio from the selected microphone starting when the user hits Enter,
-        and stopping when the user hits Enter again.
-        """
-        input("\n[MIC] Press [ENTER] to START recording...")
-        print("[MIC] >>> Recording... Speak your command now. <<<")
+    def record_until_enter(self) -> np.ndarray:
+        """Records from mic until user hits Enter in terminal."""
+        input("\n[MIC] Press ENTER to start speaking...")
+        print("[MIC] Listening... (Press ENTER again when done speaking)")
 
-        audio_frames = []
-        stop_event = threading.Event()
+        recorded_chunks = []
+        is_recording = True
 
-        def audio_callback(indata, frames, time_info, status):
-            if status:
-                print(f"[MIC Warning] {status}", flush=True)
-            audio_frames.append(indata.copy())
+        def callback(indata, frames, time_info, status):
+            if is_recording:
+                recorded_chunks.append(indata.copy())
 
-        # Direct the stream to the specified hardware device index
         stream = sd.InputStream(
-            device=AUDIO_INPUT_DEVICE,
-            samplerate=AUDIO_SAMPLE_RATE,
+            samplerate=self.sample_rate,
             channels=1,
-            dtype="float32",
-            callback=audio_callback
+            dtype='float32',
+            device=self.device_index,
+            callback=callback
         )
 
         with stream:
-            input("[MIC] Press [ENTER] again to STOP recording...")
-            stop_event.set()
+            input()
+            is_recording = False
 
-        print("[MIC] Recording stopped. Processing audio...")
-
-        if not audio_frames:
+        if not recorded_chunks:
             return np.array([], dtype=np.float32)
 
-        audio_data = np.concatenate(audio_frames, axis=0).flatten()
-        return audio_data
+        audio = np.concatenate(recorded_chunks, axis=0).flatten()
 
-    def transcribe(self, audio_data: np.ndarray) -> str:
-        """
-        Transcribes the recorded 1D float32 audio array to text.
-        """
-        if audio_data.size == 0:
-            return ""
+        # Gain normalization for maximum accuracy
+        peak = float(np.max(np.abs(audio))) if audio.size > 0 else 0.0
+        if peak > 0.0002:
+            audio = audio * (0.70 / max(peak, 0.01))
 
-        segments, info = self.model.transcribe(
-            audio_data,
-            beam_size=5,
-            language="en",
-            vad_filter=True
-        )
-
-        transcribed_text = " ".join([segment.text for segment in segments]).strip()
-        return transcribed_text
+        return audio
 
     def listen_and_transcribe(self) -> str:
-        """
-        Convenience pipeline: records user input and returns the transcribed text.
-        """
-        audio = self.record_push_to_talk()
-        if len(audio) == 0:
+        audio = self.record_until_enter()
+        if audio.size == 0 or np.max(np.abs(audio)) < 0.0005:
             return ""
-        return self.transcribe(audio)
+
+        print("[STT] Transcribing speech...")
+        segments, _ = self.whisper.transcribe(
+            audio,
+            beam_size=5,
+            best_of=5,
+            temperature=0.0,
+            language="en"
+        )
+        return " ".join([s.text for s in segments]).strip()
